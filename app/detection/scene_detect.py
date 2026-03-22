@@ -64,7 +64,10 @@ def detect_scenes_from_file(
     try:
         video = open_video(video_path)
         scene_manager = SceneManager()
-        scene_manager.add_detector(ContentDetector(threshold=threshold))
+        # TODO: add separate threshold and min_scene_len to the content detector and threshold detector
+        scene_manager.add_detector(
+            ContentDetector(threshold=threshold, min_scene_len=15)
+        )
         scene_manager.add_detector(ThresholdDetector(threshold=12.0, min_scene_len=15))
 
         scene_manager.detect_scenes(video=video)
