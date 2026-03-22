@@ -3,6 +3,12 @@
 This changelog is auto generated using release-it.
 
 
+## [1.11.0](https://github.com/celluloid-camp/vision/compare/v1.10.1...v1.11.0) (2026-03-22)
+
+### Features
+
+* Add min_scene_len parameter to ContentDetector for improved scene detection accuracy ([35f1a07](https://github.com/celluloid-camp/vision/commit/35f1a072480bbd7a7cc2ece09f3861caab8ff214))
+
 ## [1.10.1](https://github.com/celluloid-camp/vision/compare/v1.10.0...v1.10.1) (2026-03-20)
 
 ### Chores
