@@ -3,6 +3,23 @@
 This changelog is auto generated using release-it.
 
 
+## [1.10.1](https://github.com/celluloid-camp/vision/compare/v1.10.0...v1.10.1) (2026-03-20)
+
+### Chores
+
+* add workflow_dispatch trigger to release workflow ([7c35633](https://github.com/celluloid-camp/vision/commit/7c35633f8603f3cbd39cff0e35101f3ca905d1ce))
+* update Docker image name in build workflow ([6073b59](https://github.com/celluloid-camp/vision/commit/6073b59b6ef788fd58fa61e455155f17ce7785e9))
+
+## [1.10.0](https://github.com/celluloid-camp/vision/compare/v1.9.0...v1.10.0) (2026-03-18)
+
+### Features
+
+* Add job_type field to API models and update version to 1.8.0; modify Dockerfile to streamline file copying ([458bed0](https://github.com/celluloid-camp/vision/commit/458bed0eee3f17ea15124a8ef635659d26d4a00e))
+
+### Bug Fixes
+
+* Improve error handling in object and scene detection tasks by formatting callback parameters for consistency ([ae25eca](https://github.com/celluloid-camp/vision/commit/ae25eca9cd500c235766afba42b3c7cf574c8b61))
+
 ## [1.9.0](https://github.com/celluloid-camp/vision/compare/v1.8.0...v1.9.0) (2026-03-18)
 
 ### Features
