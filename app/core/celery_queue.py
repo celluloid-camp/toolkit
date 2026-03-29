@@ -17,6 +17,7 @@ ESTIMATED_MINUTES_PER_JOB = 5
 TASK_NAME_BY_JOB_TYPE = {
     "object_detect": "app.core.tasks.process_object_detect_task",
     "scene_detect": "app.core.tasks.process_scene_detect_task",
+    "transcribe": "app.core.tasks.process_transcribe_task",
 }
 
 

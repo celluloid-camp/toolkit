@@ -22,6 +22,7 @@ from pydantic import (
 class JobType(str, Enum):
     object_detect = "object_detect"
     scene_detect = "scene_detect"
+    transcribe = "transcribe"
 
 
 def _validate_video_url(v: str) -> str:
@@ -102,6 +103,31 @@ class SceneDetectParams(BaseModel):
     )
 
 
+class TranscribeParams(BaseModel):
+    model_size: str = Field(
+        "small", description="Whisper model size (tiny, base, small, medium, large-v2, large-v3)"
+    )
+    device: str = Field("cpu", description="Inference device (cpu or cuda)")
+    compute_type: str = Field(
+        "int8", description="Quantisation type (int8, float16, float32)"
+    )
+    language: Optional[str] = Field(
+        None, description="ISO-639-1 language code, or null for auto-detection"
+    )
+    diarization_enabled: bool = Field(
+        True, description="Whether to run speaker diarization"
+    )
+    num_speakers: Optional[int] = Field(
+        None, ge=1, description="Exact number of speakers (overrides min/max)"
+    )
+    min_speakers: Optional[int] = Field(
+        None, ge=1, description="Minimum number of speakers hint"
+    )
+    max_speakers: Optional[int] = Field(
+        None, ge=1, description="Maximum number of speakers hint"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Create-job request (single model, params validated by job_type)
 # ---------------------------------------------------------------------------
@@ -114,7 +140,7 @@ class CreateJobRequest(BaseModel):
     callback_url: Optional[str] = Field(
         None, description="Callback URL for job completion notifications"
     )
-    params: Union[ObjectDetectParams, SceneDetectParams] = Field(
+    params: Union[ObjectDetectParams, SceneDetectParams, TranscribeParams] = Field(
         default_factory=ObjectDetectParams
     )
 
@@ -134,6 +160,8 @@ class CreateJobRequest(BaseModel):
         if isinstance(raw_params, dict):
             if job_type == "scene_detect":
                 data["params"] = SceneDetectParams(**raw_params)
+            elif job_type == "transcribe":
+                data["params"] = TranscribeParams(**raw_params)
             else:
                 data["params"] = ObjectDetectParams(**raw_params)
         return data
@@ -266,6 +294,59 @@ class SceneDetectResultsModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Transcription result models
+# ---------------------------------------------------------------------------
+
+
+class WordModel(BaseModel):
+    word: str
+    start: float
+    end: float
+    probability: float
+
+
+class TranscriptSegmentModel(BaseModel):
+    id: int
+    start: float
+    end: float
+    speaker: Optional[str] = None
+    text: str
+    confidence: Optional[float] = None
+    words: Optional[list[WordModel]] = None
+
+
+class SpeakerSummaryModel(BaseModel):
+    label: str
+    total_speaking_time_sec: float
+
+
+class DiarizationSegmentModel(BaseModel):
+    start: float
+    end: float
+    speaker: str
+
+
+class TranscriptionMetadataModel(BaseModel):
+    engine: str
+    asr_backend: str = "faster-whisper"
+    diarization_backend: Optional[str] = None
+    device: str
+    compute_type: str
+    asr_model: str
+    language: str
+    audio_duration_sec: float
+    processing_time_sec: float
+
+
+class TranscribeResultsModel(BaseModel):
+    result_type: Literal["transcribe"] = "transcribe"
+    metadata: TranscriptionMetadataModel
+    segments: list[TranscriptSegmentModel]
+    speakers: list[SpeakerSummaryModel]
+    diarization: list[DiarizationSegmentModel]
+
+
+# ---------------------------------------------------------------------------
 # Job results response (polymorphic data)
 # ---------------------------------------------------------------------------
 
@@ -274,6 +355,7 @@ ResultData = Annotated[
     Union[
         Annotated[DetectionResultsModel, Tag("object_detect")],
         Annotated[SceneDetectResultsModel, Tag("scene_detect")],
+        Annotated[TranscribeResultsModel, Tag("transcribe")],
     ],
     Discriminator("result_type"),
 ]
