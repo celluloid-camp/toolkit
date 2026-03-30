@@ -4,12 +4,256 @@ Uses faster-whisper for ASR (CPU INT8) and pyannote.audio for speaker diarizatio
 Both models run fully self-hosted with no external API calls required.
 """
 
+import json
 import logging
 import os
+import tempfile
 import time
+from dataclasses import dataclass
+from datetime import datetime
+from inspect import signature
 from typing import Callable, List, Optional
+from urllib.parse import urlparse
+
+from app.core.utils import download_file, ensure_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _get_shared_models_root() -> str:
+    """Return the shared models root directory.
+
+    Priority:
+    1) CELLULOID_MODELS_DIR env var
+    2) /app/models (container default)
+    3) local fallback next to this module
+    """
+    env_dir = os.getenv("CELLULOID_MODELS_DIR")
+    if env_dir:
+        try:
+            ensure_dir(env_dir)
+            return env_dir
+        except Exception as exc:
+            logger.warning(
+                "Could not use CELLULOID_MODELS_DIR='%s': %s. Falling back.",
+                env_dir,
+                exc,
+            )
+
+    container_models_dir = "/app/models"
+    if os.path.isdir(container_models_dir):
+        try:
+            ensure_dir(container_models_dir)
+            return container_models_dir
+        except Exception as exc:
+            logger.warning(
+                "Could not use container models dir '%s': %s. Falling back.",
+                container_models_dir,
+                exc,
+            )
+
+    fallback_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    ensure_dir(fallback_dir)
+    return fallback_dir
+
+
+def _patch_torchaudio_audio_metadata() -> None:
+    """Patch torchaudio API drift for pyannote 3.x compatibility."""
+    try:
+        import torchaudio  # type: ignore
+    except Exception:
+        return
+
+    patched = False
+
+    if not hasattr(torchaudio, "AudioMetaData"):
+
+        @dataclass
+        class _AudioMetaDataShim:
+            sample_rate: int = 0
+            num_frames: int = 0
+            num_channels: int = 0
+            bits_per_sample: int = 0
+            encoding: str = ""
+
+        setattr(torchaudio, "AudioMetaData", _AudioMetaDataShim)
+        patched = True
+
+    if not hasattr(torchaudio, "list_audio_backends"):
+
+        def _list_audio_backends() -> List[str]:
+            return ["soundfile"]
+
+        setattr(torchaudio, "list_audio_backends", _list_audio_backends)
+        patched = True
+
+    if not hasattr(torchaudio, "get_audio_backend"):
+        setattr(torchaudio, "_compat_audio_backend", "soundfile")
+
+        def _get_audio_backend() -> str:
+            return str(getattr(torchaudio, "_compat_audio_backend", "soundfile"))
+
+        setattr(torchaudio, "get_audio_backend", _get_audio_backend)
+        patched = True
+
+    if not hasattr(torchaudio, "set_audio_backend"):
+
+        def _set_audio_backend(backend: Optional[str]) -> None:
+            if backend in (None, "soundfile", "ffmpeg", "sox"):
+                setattr(torchaudio, "_compat_audio_backend", backend or "soundfile")
+                return
+            raise ValueError(f"Unsupported audio backend: {backend}")
+
+        setattr(torchaudio, "set_audio_backend", _set_audio_backend)
+        patched = True
+
+    if not hasattr(torchaudio, "info"):
+
+        def _info(uri, backend: Optional[str] = None):  # type: ignore[no-untyped-def]
+            import soundfile as sf  # type: ignore
+
+            details = sf.info(uri)
+            return torchaudio.AudioMetaData(
+                sample_rate=int(details.samplerate or 0),
+                num_frames=int(details.frames or 0),
+                num_channels=int(details.channels or 0),
+                bits_per_sample=0,
+                encoding=str(details.format or ""),
+            )
+
+        setattr(torchaudio, "info", _info)
+        patched = True
+
+    if patched:
+        logger.info("Applied torchaudio compatibility shims for pyannote")
+
+
+def _patch_huggingface_hub_auth_kwargs() -> None:
+    """Map deprecated `use_auth_token` to `token` for new hub versions."""
+    try:
+        import huggingface_hub as hf  # type: ignore
+    except Exception:
+        return
+
+    patched = False
+
+    try:
+        hf_download_params = signature(hf.hf_hub_download).parameters
+        if "use_auth_token" not in hf_download_params:
+            original_hf_download = hf.hf_hub_download
+
+            def _hf_hub_download_compat(*args, **kwargs):  # type: ignore[no-untyped-def]
+                if "use_auth_token" in kwargs and "token" not in kwargs:
+                    kwargs["token"] = kwargs.pop("use_auth_token")
+                else:
+                    kwargs.pop("use_auth_token", None)
+                return original_hf_download(*args, **kwargs)
+
+            hf.hf_hub_download = _hf_hub_download_compat  # type: ignore[assignment]
+            patched = True
+    except Exception:
+        pass
+
+    try:
+        snapshot_params = signature(hf.snapshot_download).parameters
+        if "use_auth_token" not in snapshot_params:
+            original_snapshot = hf.snapshot_download
+
+            def _snapshot_download_compat(*args, **kwargs):  # type: ignore[no-untyped-def]
+                if "use_auth_token" in kwargs and "token" not in kwargs:
+                    kwargs["token"] = kwargs.pop("use_auth_token")
+                else:
+                    kwargs.pop("use_auth_token", None)
+                return original_snapshot(*args, **kwargs)
+
+            hf.snapshot_download = _snapshot_download_compat  # type: ignore[assignment]
+            patched = True
+    except Exception:
+        pass
+
+    if patched:
+        logger.info("Applied huggingface_hub auth kwarg compatibility shims")
+
+
+def _get_transcription_models_dir() -> str:
+    """Return local models directory for transcription backends."""
+    models_dir = os.path.join(_get_shared_models_root(), "whisper")
+    ensure_dir(models_dir)
+    return models_dir
+
+
+def _get_pyannote_cache_dir() -> str:
+    """Return local cache directory for pyannote checkpoints."""
+    cache_dir = os.path.join(_get_shared_models_root(), "pyannote")
+    ensure_dir(cache_dir)
+    return cache_dir
+
+
+def _prepare_diarization_input(audio_path: str) -> tuple[str, bool]:
+    """Return a diarization-friendly audio path (mono 16k WAV).
+
+    pyannote/torchaudio backends can fail to decode container formats like mp4
+    depending on runtime codec support. We normalize to WAV for reliability.
+
+    Returns:
+        (path, should_cleanup)
+    """
+    ext = os.path.splitext(audio_path)[1].lower()
+    if ext in {".wav", ".flac", ".ogg"}:
+        return audio_path, False
+
+    try:
+        import ffmpeg  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "ffmpeg-python is required to convert media to WAV for diarization."
+        ) from exc
+
+    with tempfile.NamedTemporaryFile(
+        prefix="pyannote_", suffix=".wav", delete=False
+    ) as tmp:
+        wav_path = tmp.name
+
+    try:
+        (
+            ffmpeg.input(audio_path)
+            .output(wav_path, ac=1, ar=16000, format="wav")
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True, quiet=True)
+        )
+        return wav_path, True
+    except Exception as exc:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Failed to prepare diarization audio from '{audio_path}': {exc}"
+        )
+
+
+def _resolve_faster_whisper_model(model_size: str) -> str:
+    """Resolve a local faster-whisper model path, downloading once if needed."""
+    if os.path.isdir(model_size):
+        return model_size
+
+    models_dir = _get_transcription_models_dir()
+    local_model_dir = os.path.join(models_dir, f"faster-whisper-{model_size}")
+
+    # Reuse existing local model if present.
+    if os.path.isdir(local_model_dir) and os.listdir(local_model_dir):
+        return local_model_dir
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception:
+        # Fallback: let faster-whisper handle download/caching.
+        return model_size
+
+    repo_id = f"Systran/faster-whisper-{model_size}"
+    logger.info("Downloading Whisper model '%s' to %s", repo_id, local_model_dir)
+    snapshot_download(repo_id=repo_id, local_dir=local_model_dir)
+    return local_model_dir
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +373,8 @@ def transcribe_audio(
         device,
         compute_type,
     )
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    resolved_model = _resolve_faster_whisper_model(model_size)
+    model = WhisperModel(resolved_model, device=device, compute_type=compute_type)
 
     transcribe_kwargs: dict = {
         "word_timestamps": True,
@@ -162,7 +407,11 @@ def transcribe_audio(
                 "start": round(seg.start, 3),
                 "end": round(seg.end, 3),
                 "text": seg.text.strip(),
-                "confidence": round(float(getattr(seg, "avg_logprob", None) or 0.0), 4) if getattr(seg, "avg_logprob", None) is not None else None,
+                "confidence": (
+                    round(float(getattr(seg, "avg_logprob", None) or 0.0), 4)
+                    if getattr(seg, "avg_logprob", None) is not None
+                    else None
+                ),
                 "words": words,
             }
         )
@@ -220,6 +469,9 @@ def diarize_audio(
         FileNotFoundError: If ``audio_path`` does not exist.
         RuntimeError: If the pipeline cannot be loaded (e.g. missing token).
     """
+    _patch_torchaudio_audio_metadata()
+    _patch_huggingface_hub_auth_kwargs()
+
     try:
         from pyannote.audio import Pipeline  # type: ignore
     except ImportError as exc:
@@ -231,15 +483,26 @@ def diarize_audio(
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    token = auth_token or os.getenv("PYANNOTE_AUTH_TOKEN")
+    token = auth_token or os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HF_TOKEN")
 
     logger.info("Loading pyannote pipeline '%s'", model_name)
     try:
-        pipeline = Pipeline.from_pretrained(model_name, use_auth_token=token)
+        from_pretrained_params = signature(Pipeline.from_pretrained).parameters
+        load_kwargs: dict = {}
+
+        if "cache_dir" in from_pretrained_params:
+            load_kwargs["cache_dir"] = _get_pyannote_cache_dir()
+
+        if token:
+            if "token" in from_pretrained_params:
+                load_kwargs["token"] = token
+            else:
+                load_kwargs["use_auth_token"] = token
+        pipeline = Pipeline.from_pretrained(model_name, **load_kwargs)
     except Exception as exc:
         raise RuntimeError(
             f"Failed to load pyannote pipeline '{model_name}': {exc}. "
-            "Make sure PYANNOTE_AUTH_TOKEN is set and you have accepted the "
+            "Make sure PYANNOTE_AUTH_TOKEN (or HF_TOKEN) is set and you have accepted the "
             "model licence on huggingface.co."
         ) from exc
 
@@ -254,7 +517,17 @@ def diarize_audio(
 
     logger.info("Running speaker diarization on %s", audio_path)
     t0 = time.time()
-    diarization = pipeline(audio_path, **diarize_kwargs)
+    diarization_input, cleanup_input = _prepare_diarization_input(audio_path)
+    try:
+        diarization = pipeline(diarization_input, **diarize_kwargs)
+    finally:
+        if cleanup_input:
+            try:
+                os.remove(diarization_input)
+            except OSError:
+                logger.warning(
+                    "Could not remove temporary diarization file: %s", diarization_input
+                )
     elapsed = time.time() - t0
     logger.info("Diarization completed in %.1fs", elapsed)
 
@@ -348,14 +621,18 @@ def run_transcription_pipeline(
                 "Diarization failed – continuing with transcript only. Error: %s", exc
             )
 
-    merged = merge_transcript_with_speakers(asr_result["segments"], diarization_segments)
+    merged = merge_transcript_with_speakers(
+        asr_result["segments"], diarization_segments
+    )
     speakers = aggregate_speakers(merged)
 
     processing_time = round(time.time() - pipeline_start, 3)
 
     return {
         "metadata": {
-            "engine": "faster-whisper+pyannote" if diarization_segments else "faster-whisper",
+            "engine": (
+                "faster-whisper+pyannote" if diarization_segments else "faster-whisper"
+            ),
             "asr_backend": "faster-whisper",
             "diarization_backend": "pyannote" if diarization_segments else None,
             "device": device,
@@ -369,3 +646,70 @@ def run_transcription_pipeline(
         "speakers": speakers,
         "diarization": diarization_segments,
     }
+
+
+def main() -> int:
+    """CLI entry point for transcription + diarization."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio/video with faster-whisper + pyannote"
+    )
+    parser.add_argument("audio_url", help="URL or local path to an audio/video file")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory (default: tmp next to this file)",
+    )
+    parser.add_argument(
+        "--model-size",
+        default="small",
+        help="Whisper model size (default: small)",
+    )
+    parser.add_argument(
+        "--language",
+        default=None,
+        help="Force language code (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--disable-diarization",
+        action="store_true",
+        help="Run transcription without speaker diarization",
+    )
+    args = parser.parse_args()
+
+    audio_url = args.audio_url
+    tmp_dir = args.output_dir or os.path.join(os.getcwd(), "tmp")
+    ensure_dir(tmp_dir)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if audio_url.startswith(("http://", "https://")):
+        filename = os.path.basename(urlparse(audio_url).path)
+        if not filename or "." not in filename:
+            filename = "audio.mp4"
+        name, ext = os.path.splitext(filename)
+        unique_filename = f"{name}_{timestamp}{ext}"
+        audio_path = os.path.join(tmp_dir, unique_filename)
+        print(f"Downloading media to: {audio_path}")
+        download_file(audio_url, audio_path)
+    else:
+        audio_path = audio_url
+
+    results = run_transcription_pipeline(
+        audio_path=audio_path,
+        model_size=args.model_size,
+        language=args.language,
+        diarization_enabled=not args.disable_diarization,
+    )
+
+    output_path = os.path.join(tmp_dir, f"transcription_{timestamp}.json")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+
+    print(f"Transcription results saved to: {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    main()

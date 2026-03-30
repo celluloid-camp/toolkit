@@ -10,7 +10,6 @@ dependencies = [
     "numpy>=1.24.0",
     "requests>=2.31.0",
     "Pillow>=10.0.0",
-    "matplotlib>=3.7.0",
     "fastapi==0.104.1",
     "python-dotenv>=1.0.0",
     "asgiref>=3.8.1",
@@ -24,7 +23,10 @@ dependencies = [
     "uvicorn>=0.34.3",
     "scenedetect==0.6.7.1",
     "faster-whisper>=1.1.1",
-    "pyannote.audio>=3.3.2",
+    "pyannote.audio==3.3.2",
+    "huggingface-hub<1.0",
+    "torch<2.6",
+    "torchaudio<2.6",
     "ffmpeg-python>=0.2.0",
 ]
 

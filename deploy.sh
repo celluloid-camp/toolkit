@@ -24,7 +24,7 @@ docker run -d \
     -p 5555:5555 \
     -v "$(pwd)/outputs:/app/outputs" \
     -v "$(pwd)/flower:/app/flower" \
-    -v "$(pwd)/models:/app/models:ro" \
+    -v "$(pwd)/models:/app/models" \
     -e REDIS_URL="redis://host.docker.internal:6379/0" \
     -e API_KEY="xxx" \
     -e BASE_URL="http://localhost:8081" \
@@ -33,6 +33,7 @@ docker run -d \
     -e FLOWER_UNAUTHENTICATED_API="true" \
     -e FLOWER_PERSISTENT="true" \
     -e FLOWER_DB="/app/flower/flower.db" \
+    -e CELLULOID_MODELS_DIR="/app/models" \
     celluloid-video-analysis-api
 
 # Wait for service to be ready

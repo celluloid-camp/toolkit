@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FrameEntry } from '../types'
-import { findActiveFrameIndexForPlayback } from '../lib/frameSync'
+import { findLastFrameIndexAtOrBefore } from '../lib/frameSync'
 import { BboxOverlay } from './BboxOverlay'
 
 type Props = {
@@ -68,21 +68,12 @@ export function VideoDetectionPlayer({
   const current =
     frameIndex >= 0 && frames[frameIndex] ? frames[frameIndex] : undefined
 
-  /** Half a source frame at `fps` — only show a keyframe when playback is this close in time. */
-  const maxDeltaSec = useMemo(
-    () => Math.max(0.02, 0.5 / (fps != null && fps > 0 ? fps : 25)),
-    [fps],
-  )
-
-  const maxDeltaRef = useRef(maxDeltaSec)
-  maxDeltaRef.current = maxDeltaSec
-
   const syncFrameFromVideo = useCallback(() => {
     const el = videoRef.current
     const fr = framesRef.current
     if (!el || fr.length === 0 || skipTimeSync.current) return
     const t = el.currentTime
-    const idx = findActiveFrameIndexForPlayback(fr, t, maxDeltaRef.current)
+    const idx = findLastFrameIndexAtOrBefore(fr, t)
     if (idx !== frameIndexRef.current) {
       indexFromPlayback.current = true
       onFrameIndexChangeRef.current(idx)
