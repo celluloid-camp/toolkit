@@ -92,7 +92,11 @@ async def create_job(
     try:
         all_jobs = job_manager.get_all_jobs()
 
-        existing_jobs = [job for job in all_jobs if job.external_id == body.external_id]
+        existing_jobs = [
+            job
+            for job in all_jobs
+            if job.external_id == body.external_id and job.job_type == body.job_type
+        ]
 
         active_jobs = [
             job for job in existing_jobs if job.status in ["queued", "processing"]

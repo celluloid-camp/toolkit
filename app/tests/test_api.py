@@ -441,6 +441,26 @@ class TestJobStatus:
         assert r2.status_code == 202
         assert r2.json()["job_id"] == job_id_1
 
+    def test_different_job_types_same_project_create_separate_jobs(self):
+        external_id = "ci-dedup-job-type-test"
+        r1 = requests.post(
+            f"{BASE_URL}/job/create",
+            json=_scene_detect_payload(external_id=external_id),
+            headers=HEADERS_AUTH,
+        )
+        if r1.status_code != 202:
+            pytest.skip("Could not enqueue job; skipping job-type dedup test")
+        job_id_1 = r1.json()["job_id"]
+
+        r2 = requests.post(
+            f"{BASE_URL}/job/create",
+            json=_object_detect_payload(external_id=external_id),
+            headers=HEADERS_AUTH,
+        )
+        assert r2.status_code == 202
+        assert r2.json()["job_id"] != job_id_1
+        assert r2.json()["job_type"] == "object_detect"
+
 
 # ---------------------------------------------------------------------------
 # GET /job/{job_id}/results
