@@ -3,6 +3,29 @@
 This changelog is auto generated using release-it.
 
 
+## [1.12.0](https://github.com/celluloid-camp/toolkit/compare/v1.11.0...v1.12.0) (2026-06-11)
+
+### Features
+
+* transcription + speaker diarization pipeline ([e4714bc](https://github.com/celluloid-camp/toolkit/commit/e4714bccd86e42978821eac2725f1cc075d41c64))
+
+### Bug Fixes
+
+* persist PENDING jobs in Redis registry to fix status/dedup CI failures ([68a1b35](https://github.com/celluloid-camp/toolkit/commit/68a1b3508c336bb29e5222af53790706f6a97d07))
+
+### Tests
+
+* use real video URL in tests and add transcribe job type tests ([7eed24a](https://github.com/celluloid-camp/toolkit/commit/7eed24a046f0a6458193078a9af59d8d5f514f82))
+
+### Chores
+
+* regenerate openapi.json with transcribe job type schemas ([2a50283](https://github.com/celluloid-camp/toolkit/commit/2a502839bc4d70311e3f61aea0700271198a133a))
+* update .gitignore and env.example for model handling and HuggingFace tokens ([f0261f4](https://github.com/celluloid-camp/toolkit/commit/f0261f4da0eef5f2f3792f92f8eddf118aa056d1))
+
+### Code Refactoring
+
+* deployment tooling, job status fixes, and env-based HF tokens ([0b5be31](https://github.com/celluloid-camp/toolkit/commit/0b5be315e72ecd0a99b1c78c63a9a49dfb96ff9e))
+
 ## [1.11.0](https://github.com/celluloid-camp/vision/compare/v1.10.1...v1.11.0) (2026-03-22)
 
 ### Features
