@@ -1,7 +1,7 @@
 [project]
-name = "celluloid-vision"
+name = "celluloid-toolkit"
 version = "0.1.0"
-description = "Video detection and analysis application powered by MediaPipe and scenedetect"
+description = "Celluloid Toolkit is a collection of tools for video detection and analysis, transcription, diarization and more."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

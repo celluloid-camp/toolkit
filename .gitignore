@@ -192,3 +192,6 @@ flower
 .flower/
 .data/
 models/
+
+# Docker BuildKit local cache (deploy.sh)
+.docker-cache/

@@ -102,7 +102,21 @@ def _cleanup_video(video_url: str, video_path: str) -> None:
             logger.warning(f"Failed to clean up temporary video file: {str(e)}")
 
 
-def _make_progress_reporter(task, job_id, external_id, start_time):
+def _processing_meta(job_data: dict, start_time: str, progress: float = 0.0) -> dict:
+    """Build a complete Celery PROCESSING meta payload (replaces prior meta)."""
+    return {
+        "job_id": job_data["job_id"],
+        "external_id": job_data["external_id"],
+        "video_url": job_data["video_url"],
+        "job_type": job_data["job_type"],
+        "callback_url": job_data.get("callback_url"),
+        "status": "processing",
+        "progress": round(progress, 1),
+        "start_time": start_time,
+    }
+
+
+def _make_progress_reporter(task, job_data: dict, start_time: str):
     """Create a throttled progress callback for Celery state updates."""
     last_reported = [0.0]
 
@@ -111,13 +125,7 @@ def _make_progress_reporter(task, job_id, external_id, start_time):
             last_reported[0] = pct
             task.update_state(
                 state="PROCESSING",
-                meta={
-                    "job_id": job_id,
-                    "external_id": external_id,
-                    "status": "processing",
-                    "progress": round(pct, 1),
-                    "start_time": start_time,
-                },
+                meta=_processing_meta(job_data, start_time, pct),
             )
 
     return _report
@@ -142,16 +150,7 @@ def process_object_detect_task(self, job_data: dict):
 
     self.update_state(
         state="PROCESSING",
-        meta={
-            "job_id": job_id,
-            "external_id": external_id,
-            "video_url": video_url,
-            "job_type": "object_detect",
-            "callback_url": callback_url,
-            "status": "processing",
-            "progress": 0.0,
-            "start_time": start_time,
-        },
+        meta=_processing_meta(job_data, start_time, 0.0),
     )
 
     try:
@@ -174,7 +173,7 @@ def process_object_detect_task(self, job_data: dict):
             analysis_fps=analysis_fps,
         )
 
-        progress_cb = _make_progress_reporter(self, job_id, external_id, start_time)
+        progress_cb = _make_progress_reporter(self, job_data, start_time)
         results = detector.process_video(
             video_path, video_url, progress_callback=progress_cb
         )
@@ -266,16 +265,7 @@ def process_scene_detect_task(self, job_data: dict):
 
     self.update_state(
         state="PROCESSING",
-        meta={
-            "job_id": job_id,
-            "external_id": external_id,
-            "video_url": video_url,
-            "job_type": "scene_detect",
-            "callback_url": callback_url,
-            "status": "processing",
-            "progress": 0.0,
-            "start_time": start_time,
-        },
+        meta=_processing_meta(job_data, start_time, 0.0),
     )
 
     try:
@@ -293,13 +283,7 @@ def process_scene_detect_task(self, job_data: dict):
 
         self.update_state(
             state="PROCESSING",
-            meta={
-                "job_id": job_id,
-                "external_id": external_id,
-                "status": "processing",
-                "progress": 10.0,
-                "start_time": start_time,
-            },
+            meta=_processing_meta(job_data, start_time, 10.0),
         )
 
         from app.detection.scene_detect import detect_scenes_from_file
@@ -316,13 +300,7 @@ def process_scene_detect_task(self, job_data: dict):
 
         self.update_state(
             state="PROCESSING",
-            meta={
-                "job_id": job_id,
-                "external_id": external_id,
-                "status": "processing",
-                "progress": 90.0,
-                "start_time": start_time,
-            },
+            meta=_processing_meta(job_data, start_time, 90.0),
         )
 
         if scene_result.sprite_url:
@@ -430,16 +408,7 @@ def process_transcribe_task(self, job_data: dict):
 
     self.update_state(
         state="PROCESSING",
-        meta={
-            "job_id": job_id,
-            "external_id": external_id,
-            "video_url": video_url,
-            "job_type": "transcribe",
-            "callback_url": callback_url,
-            "status": "processing",
-            "progress": 0.0,
-            "start_time": start_time,
-        },
+        meta=_processing_meta(job_data, start_time, 0.0),
     )
 
     try:
@@ -456,7 +425,7 @@ def process_transcribe_task(self, job_data: dict):
         else:
             audio_path = video_url
 
-        progress_cb = _make_progress_reporter(self, job_id, external_id, start_time)
+        progress_cb = _make_progress_reporter(self, job_data, start_time)
 
         from app.detection.transcribe import run_transcription_pipeline
 

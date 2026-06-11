@@ -140,6 +140,25 @@ class CeleryJobManager:
         job.progress = progress
         return job
 
+    def _enrich_from_registry(self, job: JobStatus) -> JobStatus:
+        """Fill missing fields from the Redis job registry (e.g. after partial meta)."""
+        registry = self._load_from_registry(job.job_id)
+        if not registry:
+            return job
+        if not job.job_type or (
+            job.job_type == "object_detect" and registry.job_type != "object_detect"
+        ):
+            job.job_type = registry.job_type
+        if job.video_url == "unknown" and registry.video_url != "unknown":
+            job.video_url = registry.video_url
+        if not job.callback_url and registry.callback_url:
+            job.callback_url = registry.callback_url
+        if job.external_id == "unknown" and registry.external_id != "unknown":
+            job.external_id = registry.external_id
+        if not job.params and registry.params:
+            job.params = registry.params
+        return job
+
     def _inspect_tasks(self) -> tuple[list[dict], list[dict], list[dict]]:
         """Return (active, reserved, scheduled) task lists from Celery inspect."""
         inspector = celery_app.control.inspect(timeout=1.0)
@@ -166,7 +185,7 @@ class CeleryJobManager:
                 )
                 if task_info.get("start_time"):
                     job.start_time = datetime.fromisoformat(task_info["start_time"])
-                return job
+                return self._enrich_from_registry(job)
 
             if celery_state == "SUCCESS":
                 task_result = result.result if isinstance(result.result, dict) else {}
@@ -204,11 +223,13 @@ class CeleryJobManager:
             for task in active:
                 if task.get("id") == job_id:
                     payload = self._extract_job_data(task)
-                    return self._job_from_payload(job_id, payload, "processing")
+                    job = self._job_from_payload(job_id, payload, "processing")
+                    return self._enrich_from_registry(job)
             for task in reserved + scheduled:
                 if task.get("id") == job_id:
                     payload = self._extract_job_data(task)
-                    return self._job_from_payload(job_id, payload, "queued")
+                    job = self._job_from_payload(job_id, payload, "queued")
+                    return self._enrich_from_registry(job)
 
             # Fall back to our lightweight Redis registry.  A task can be in
             # PENDING state but not yet visible to the inspector when the worker
