@@ -42,11 +42,14 @@ def _wait_for_api(max_wait: int = 60) -> None:
     pytest.fail(f"API at {BASE_URL} did not become ready within {max_wait}s")
 
 
+TEST_VIDEO_URL = "https://pt-storage.celluloid.cloud/web-videos/a53d2ce5-0db1-49bf-9daa-be2dafd46ee9-144.mp4"
+
+
 def _object_detect_payload(**overrides) -> dict:
     base = {
         "job_type": "object_detect",
         "external_id": "ci-test-project",
-        "video_url": "http://example.com/video.mp4",
+        "video_url": TEST_VIDEO_URL,
         "params": {"similarity_threshold": 0.5},
     }
     base.update(overrides)
@@ -57,8 +60,19 @@ def _scene_detect_payload(**overrides) -> dict:
     base = {
         "job_type": "scene_detect",
         "external_id": "ci-test-project-scene",
-        "video_url": "http://example.com/video.mp4",
+        "video_url": TEST_VIDEO_URL,
         "params": {"threshold": 30.0},
+    }
+    base.update(overrides)
+    return base
+
+
+def _transcribe_payload(**overrides) -> dict:
+    base = {
+        "job_type": "transcribe",
+        "external_id": "ci-test-project-transcribe",
+        "video_url": TEST_VIDEO_URL,
+        "params": {"model_size": "small", "diarization_enabled": False},
     }
     base.update(overrides)
     return base
@@ -326,11 +340,50 @@ class TestCreateJobValidation:
             json={
                 "job_type": "scene_detect",
                 "external_id": "ci-scene-defaults",
-                "video_url": "http://example.com/video.mp4",
+                "video_url": TEST_VIDEO_URL,
             },
             headers=HEADERS_AUTH,
         )
         assert r.status_code in (202, 422)
+
+    def test_transcribe_response_shape(self):
+        r = requests.post(
+            f"{BASE_URL}/job/create",
+            json=_transcribe_payload(external_id="ci-shape-tr"),
+            headers=HEADERS_AUTH,
+        )
+        if r.status_code == 202:
+            data = r.json()
+            assert data["job_type"] == "transcribe"
+            assert "job_id" in data
+            assert "status" in data
+            assert "queue_position" in data
+            assert "message" in data
+
+    def test_transcribe_default_params(self):
+        """transcribe works without explicit params (defaults applied)."""
+        r = requests.post(
+            f"{BASE_URL}/job/create",
+            json={
+                "job_type": "transcribe",
+                "external_id": "ci-transcribe-defaults",
+                "video_url": TEST_VIDEO_URL,
+            },
+            headers=HEADERS_AUTH,
+        )
+        assert r.status_code in (202, 422)
+
+    def test_transcribe_invalid_job_type_returns_422(self):
+        r = requests.post(
+            f"{BASE_URL}/job/create",
+            json={
+                "job_type": "invalid_type",
+                "external_id": "ci-proj",
+                "video_url": TEST_VIDEO_URL,
+            },
+            headers=HEADERS_AUTH,
+        )
+        assert r.status_code == 422
 
 
 # ---------------------------------------------------------------------------

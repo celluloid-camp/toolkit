@@ -85,7 +85,7 @@ tags_metadata = [
 
 # Create FastAPI app
 app = FastAPI(
-    title="Celluloid Video Analysis API",
+    title="Celluloid Toolkit API",
     version=get_version(),
     lifespan=lifespan,
     openapi_tags=tags_metadata,

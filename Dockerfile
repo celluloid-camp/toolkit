@@ -15,6 +15,7 @@ RUN echo "Acquire::http::Pipeline-Depth 0;" > /etc/apt/apt.conf.d/99custom && \
 
 # Install OpenCV dependencies and Redis
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
     libglib2.0-0 \
     libsm6 \
     libxext6 \

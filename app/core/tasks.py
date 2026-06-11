@@ -102,7 +102,21 @@ def _cleanup_video(video_url: str, video_path: str) -> None:
             logger.warning(f"Failed to clean up temporary video file: {str(e)}")
 
 
-def _make_progress_reporter(task, job_id, external_id, start_time):
+def _processing_meta(job_data: dict, start_time: str, progress: float = 0.0) -> dict:
+    """Build a complete Celery PROCESSING meta payload (replaces prior meta)."""
+    return {
+        "job_id": job_data["job_id"],
+        "external_id": job_data["external_id"],
+        "video_url": job_data["video_url"],
+        "job_type": job_data["job_type"],
+        "callback_url": job_data.get("callback_url"),
+        "status": "processing",
+        "progress": round(progress, 1),
+        "start_time": start_time,
+    }
+
+
+def _make_progress_reporter(task, job_data: dict, start_time: str):
     """Create a throttled progress callback for Celery state updates."""
     last_reported = [0.0]
 
@@ -111,13 +125,7 @@ def _make_progress_reporter(task, job_id, external_id, start_time):
             last_reported[0] = pct
             task.update_state(
                 state="PROCESSING",
-                meta={
-                    "job_id": job_id,
-                    "external_id": external_id,
-                    "status": "processing",
-                    "progress": round(pct, 1),
-                    "start_time": start_time,
-                },
+                meta=_processing_meta(job_data, start_time, pct),
             )
 
     return _report
@@ -142,16 +150,7 @@ def process_object_detect_task(self, job_data: dict):
 
     self.update_state(
         state="PROCESSING",
-        meta={
-            "job_id": job_id,
-            "external_id": external_id,
-            "video_url": video_url,
-            "job_type": "object_detect",
-            "callback_url": callback_url,
-            "status": "processing",
-            "progress": 0.0,
-            "start_time": start_time,
-        },
+        meta=_processing_meta(job_data, start_time, 0.0),
     )
 
     try:
@@ -174,7 +173,7 @@ def process_object_detect_task(self, job_data: dict):
             analysis_fps=analysis_fps,
         )
 
-        progress_cb = _make_progress_reporter(self, job_id, external_id, start_time)
+        progress_cb = _make_progress_reporter(self, job_data, start_time)
         results = detector.process_video(
             video_path, video_url, progress_callback=progress_cb
         )
@@ -266,16 +265,7 @@ def process_scene_detect_task(self, job_data: dict):
 
     self.update_state(
         state="PROCESSING",
-        meta={
-            "job_id": job_id,
-            "external_id": external_id,
-            "video_url": video_url,
-            "job_type": "scene_detect",
-            "callback_url": callback_url,
-            "status": "processing",
-            "progress": 0.0,
-            "start_time": start_time,
-        },
+        meta=_processing_meta(job_data, start_time, 0.0),
     )
 
     try:
@@ -293,13 +283,7 @@ def process_scene_detect_task(self, job_data: dict):
 
         self.update_state(
             state="PROCESSING",
-            meta={
-                "job_id": job_id,
-                "external_id": external_id,
-                "status": "processing",
-                "progress": 10.0,
-                "start_time": start_time,
-            },
+            meta=_processing_meta(job_data, start_time, 10.0),
         )
 
         from app.detection.scene_detect import detect_scenes_from_file
@@ -316,13 +300,7 @@ def process_scene_detect_task(self, job_data: dict):
 
         self.update_state(
             state="PROCESSING",
-            meta={
-                "job_id": job_id,
-                "external_id": external_id,
-                "status": "processing",
-                "progress": 90.0,
-                "start_time": start_time,
-            },
+            meta=_processing_meta(job_data, start_time, 90.0),
         )
 
         if scene_result.sprite_url:
@@ -384,6 +362,147 @@ def process_scene_detect_task(self, job_data: dict):
                 job_id,
                 external_id,
                 "scene_detect",
+                callback_url,
+                "failed",
+                error=error_msg,
+            )
+
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Transcribe task
+# ---------------------------------------------------------------------------
+
+
+@celery_app.task(bind=True, name="app.core.tasks.process_transcribe_task")
+def process_transcribe_task(self, job_data: dict):
+    """Celery task for audio transcription with optional speaker diarization."""
+    job_id = job_data["job_id"]
+    external_id = job_data["external_id"]
+    video_url = job_data["video_url"]
+    params = job_data.get("params", {})
+    callback_url = job_data.get("callback_url")
+    start_time = datetime.now().isoformat()
+
+    from app.core.config import (
+        DIARIZATION_ENABLED,
+        PYANNOTE_AUTH_TOKEN,
+        PYANNOTE_MODEL,
+        WHISPER_COMPUTE_TYPE,
+        WHISPER_DEVICE,
+        WHISPER_LANGUAGE,
+        WHISPER_MODEL_SIZE,
+    )
+
+    model_size = params.get("model_size", WHISPER_MODEL_SIZE)
+    device = params.get("device", WHISPER_DEVICE)
+    compute_type = params.get("compute_type", WHISPER_COMPUTE_TYPE)
+    language = params.get("language", WHISPER_LANGUAGE) or None
+    diarization_enabled = params.get("diarization_enabled", DIARIZATION_ENABLED)
+    num_speakers = params.get("num_speakers")
+    min_speakers = params.get("min_speakers")
+    max_speakers = params.get("max_speakers")
+    auth_token = PYANNOTE_AUTH_TOKEN
+    pyannote_model = PYANNOTE_MODEL
+
+    self.update_state(
+        state="PROCESSING",
+        meta=_processing_meta(job_data, start_time, 0.0),
+    )
+
+    try:
+        output_dir = os.path.join("outputs", external_id)
+        os.makedirs(output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"transcript_{job_id}_{timestamp}.json"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # Download remote file; local paths are used directly.
+        if video_url.startswith(("http://", "https://")):
+            audio_path = download_video(video_url)
+        else:
+            audio_path = video_url
+
+        progress_cb = _make_progress_reporter(self, job_data, start_time)
+
+        from app.detection.transcribe import run_transcription_pipeline
+
+        result = run_transcription_pipeline(
+            audio_path=audio_path,
+            model_size=model_size,
+            device=device,
+            compute_type=compute_type,
+            language=language,
+            diarization_enabled=diarization_enabled,
+            auth_token=auth_token,
+            pyannote_model=pyannote_model,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            progress_callback=progress_cb,
+        )
+
+        result["result_type"] = "transcribe"
+
+        with open(output_path, "w") as f:
+            json.dump(result, f, indent=2)
+
+        logger.info(f"Transcript saved to: {output_path}")
+
+        metadata = {
+            "language": result["metadata"]["language"],
+            "audio_duration_sec": result["metadata"]["audio_duration_sec"],
+            "processing_time_sec": result["metadata"]["processing_time_sec"],
+            "segment_count": len(result["segments"]),
+            "speaker_count": len(result["speakers"]),
+        }
+
+        end_time = datetime.now().isoformat()
+        logger.info(f"Transcription job {job_id} completed successfully")
+
+        if callback_url:
+            _send_callback_sync(
+                job_id,
+                external_id,
+                "transcribe",
+                callback_url,
+                "completed",
+                {"result_path": output_path, "metadata": metadata},
+            )
+
+        # Clean up downloaded file
+        if video_url.startswith(("http://", "https://")):
+            try:
+                os.remove(audio_path)
+                logger.info(f"Cleaned up temporary file: {audio_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file: {str(e)}")
+
+        return {
+            "job_id": job_id,
+            "external_id": external_id,
+            "video_url": video_url,
+            "job_type": "transcribe",
+            "callback_url": callback_url,
+            "status": "completed",
+            "result_path": output_path,
+            "start_time": start_time,
+            "end_time": end_time,
+            "metadata": metadata,
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Transcription job {job_id} failed: {error_msg}")
+        logger.error(traceback.format_exc())
+
+        if callback_url:
+            _send_callback_sync(
+                job_id,
+                external_id,
+                "transcribe",
                 callback_url,
                 "failed",
                 error=error_msg,

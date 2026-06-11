@@ -1,22 +1,27 @@
 """Celery-based job manager relying on Celery APIs only."""
 
 import ast
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
 
+import redis as redis_lib
 from celery.result import AsyncResult
 
-from app.core.celery_app import CELERY_QUEUE_NAME, celery_app
+from app.core.celery_app import CELERY_QUEUE_NAME, REDIS_URL, celery_app
 from app.models.schemas import JobStatus
 
 logger = logging.getLogger(__name__)
 
 ESTIMATED_MINUTES_PER_JOB = 5
+# TTL for the lightweight job registry entries (24 h, matches Celery result_expires)
+_JOB_REGISTRY_TTL = 86400
 
 TASK_NAME_BY_JOB_TYPE = {
     "object_detect": "app.core.tasks.process_object_detect_task",
     "scene_detect": "app.core.tasks.process_scene_detect_task",
+    "transcribe": "app.core.tasks.process_transcribe_task",
 }
 
 
@@ -24,7 +29,75 @@ class CeleryJobManager:
     def __init__(self, queue_name: str = CELERY_QUEUE_NAME):
         """Initialize Celery job manager."""
         self.queue_name = queue_name
+        self._redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
         logger.info("Initialized Celery job manager with queue: %s", queue_name)
+
+    # ------------------------------------------------------------------
+    # Internal helpers for the lightweight job registry stored in Redis.
+    # These let us find PENDING tasks that aren't yet in the worker's
+    # active/reserved lists (happens when the worker is busy and has not
+    # pre-fetched the task yet).
+    # ------------------------------------------------------------------
+
+    def _registry_key(self, job_id: str) -> str:
+        return f"cvision:job:{job_id}"
+
+    def _save_to_registry(self, job: JobStatus):
+        """Persist a minimal job record so we can look it up while PENDING."""
+        payload = {
+            "job_id": job.job_id,
+            "external_id": job.external_id,
+            "video_url": job.video_url,
+            "job_type": job.job_type,
+            "callback_url": job.callback_url or "",
+            "params": json.dumps(job.params or {}),
+            "status": "queued",
+            "start_time": datetime.now().isoformat(),
+        }
+        try:
+            self._redis.hset(self._registry_key(job.job_id), mapping=payload)
+            self._redis.expire(self._registry_key(job.job_id), _JOB_REGISTRY_TTL)
+        except Exception as e:
+            logger.warning("Could not write job registry entry %s: %s", job.job_id, e)
+
+    def _load_from_registry(self, job_id: str) -> Optional[JobStatus]:
+        """Load a job from the Redis registry (fallback for PENDING state)."""
+        try:
+            data = self._redis.hgetall(self._registry_key(job_id))
+            if not data:
+                return None
+            job = JobStatus(
+                job_id=data["job_id"],
+                external_id=data.get("external_id", "unknown"),
+                video_url=data.get("video_url", "unknown"),
+                job_type=data.get("job_type", "object_detect"),
+                callback_url=data.get("callback_url") or None,
+                params=json.loads(data.get("params", "{}")),
+            )
+            job.status = data.get("status", "queued")
+            raw_start = data.get("start_time")
+            if raw_start:
+                try:
+                    job.start_time = datetime.fromisoformat(raw_start)
+                except ValueError:
+                    pass
+            return job
+        except Exception as e:
+            logger.warning("Could not read job registry entry %s: %s", job_id, e)
+            return None
+
+    def _all_registry_jobs(self) -> List[JobStatus]:
+        """Return all queued jobs stored in the registry."""
+        jobs: List[JobStatus] = []
+        try:
+            for key in self._redis.scan_iter("cvision:job:*"):
+                job_id = key.split(":")[-1]
+                job = self._load_from_registry(job_id)
+                if job:
+                    jobs.append(job)
+        except Exception as e:
+            logger.warning("Could not list registry jobs: %s", e)
+        return jobs
 
     def ping(self) -> bool:
         """Test connectivity through Celery control API."""
@@ -67,6 +140,25 @@ class CeleryJobManager:
         job.progress = progress
         return job
 
+    def _enrich_from_registry(self, job: JobStatus) -> JobStatus:
+        """Fill missing fields from the Redis job registry (e.g. after partial meta)."""
+        registry = self._load_from_registry(job.job_id)
+        if not registry:
+            return job
+        if not job.job_type or (
+            job.job_type == "object_detect" and registry.job_type != "object_detect"
+        ):
+            job.job_type = registry.job_type
+        if job.video_url == "unknown" and registry.video_url != "unknown":
+            job.video_url = registry.video_url
+        if not job.callback_url and registry.callback_url:
+            job.callback_url = registry.callback_url
+        if job.external_id == "unknown" and registry.external_id != "unknown":
+            job.external_id = registry.external_id
+        if not job.params and registry.params:
+            job.params = registry.params
+        return job
+
     def _inspect_tasks(self) -> tuple[list[dict], list[dict], list[dict]]:
         """Return (active, reserved, scheduled) task lists from Celery inspect."""
         inspector = celery_app.control.inspect(timeout=1.0)
@@ -93,7 +185,7 @@ class CeleryJobManager:
                 )
                 if task_info.get("start_time"):
                     job.start_time = datetime.fromisoformat(task_info["start_time"])
-                return job
+                return self._enrich_from_registry(job)
 
             if celery_state == "SUCCESS":
                 task_result = result.result if isinstance(result.result, dict) else {}
@@ -131,13 +223,18 @@ class CeleryJobManager:
             for task in active:
                 if task.get("id") == job_id:
                     payload = self._extract_job_data(task)
-                    return self._job_from_payload(job_id, payload, "processing")
+                    job = self._job_from_payload(job_id, payload, "processing")
+                    return self._enrich_from_registry(job)
             for task in reserved + scheduled:
                 if task.get("id") == job_id:
                     payload = self._extract_job_data(task)
-                    return self._job_from_payload(job_id, payload, "queued")
+                    job = self._job_from_payload(job_id, payload, "queued")
+                    return self._enrich_from_registry(job)
 
-            return None
+            # Fall back to our lightweight Redis registry.  A task can be in
+            # PENDING state but not yet visible to the inspector when the worker
+            # is already busy and hasn't pre-fetched the task yet.
+            return self._load_from_registry(job_id)
         except Exception as e:
             logger.error("Error getting job %s from Celery: %s", job_id, str(e))
             return None
@@ -147,8 +244,13 @@ class CeleryJobManager:
         logger.debug("save_job_to_celery no-op for job %s", job.job_id)
 
     def get_all_jobs(self) -> List[JobStatus]:
-        """Get all visible queued/processing jobs from Celery inspect APIs."""
-        jobs: list[JobStatus] = []
+        """Get all visible queued/processing jobs from Celery inspect APIs.
+
+        Also includes jobs in the Redis registry that haven't been pre-fetched
+        by the worker yet (PENDING state not visible to the inspector).
+        """
+        jobs: List[JobStatus] = []
+        seen_ids: set[str] = set()
         try:
             active, reserved, scheduled = self._inspect_tasks()
 
@@ -157,19 +259,39 @@ class CeleryJobManager:
                 job_id = task.get("id")
                 if job_id:
                     jobs.append(self._job_from_payload(job_id, payload, "processing"))
+                    seen_ids.add(job_id)
 
             for task in reserved + scheduled:
                 payload = self._extract_job_data(task)
                 job_id = task.get("id")
                 if job_id:
                     jobs.append(self._job_from_payload(job_id, payload, "queued"))
+                    seen_ids.add(job_id)
         except Exception as e:
             logger.error("Error getting all jobs: %s", str(e))
+
+        # Add queued jobs from the registry that the inspector hasn't seen yet.
+        for job in self._all_registry_jobs():
+            if job.job_id not in seen_ids:
+                # Only include if Celery hasn't moved the task past PENDING.
+                result = AsyncResult(job.job_id, app=celery_app)
+                if result.state == "PENDING":
+                    jobs.append(job)
+                    seen_ids.add(job.job_id)
+
         return jobs
 
     def cleanup_stale_jobs(self):
-        """Compatibility no-op (no Redis job registry)."""
-        logger.info("No stale job cleanup required (Celery-only mode).")
+        """Remove registry entries for jobs that have been fully processed."""
+        try:
+            for key in self._redis.scan_iter("cvision:job:*"):
+                job_id = key.split(":")[-1]
+                result = AsyncResult(job_id, app=celery_app)
+                if result.state not in ("PENDING",):
+                    self._redis.delete(key)
+            logger.info("Cleaned up stale job registry entries.")
+        except Exception as e:
+            logger.warning("Error during stale job cleanup: %s", e)
 
     def get_queue_status_info(self):
         """Get current queue status from Celery inspect APIs."""
@@ -214,6 +336,10 @@ class CeleryJobManager:
                 task_id=job.job_id,
                 queue=self.queue_name,
             )
+
+            # Persist a lightweight record so PENDING jobs are discoverable
+            # even before the worker pre-fetches the task.
+            self._save_to_registry(job)
 
             logger.info(
                 "Enqueued %s job %s to Celery queue %s",

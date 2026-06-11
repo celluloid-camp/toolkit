@@ -1,7 +1,66 @@
-# Celluloid Video Analysis API
+# Celluloid Toolkit
 
-Video detection and analysis application powered by MediaPipe and scenedetect.
-Features person detection, tracking and timeline visualization.
+Celluloid Toolkit is a collection of tools for video detection and analysis, transcription, diarization and more.
+Project used in [Celluloid platform](https://celluloid.me).
+
+## Features
+
+```mermaid
+flowchart TB
+    subgraph Platform["Celluloid platform"]
+        Celluloid["celluloid.me"]
+    end
+
+    subgraph Toolkit["Celluloid Toolkit"]
+        subgraph Entry["Entry points"]
+            CLI["CLI scripts\nanalyse.py · object_detect.py · scene_detect.py · transcribe.py"]
+            API["REST API\nFastAPI · x-api-key auth"]
+        end
+
+        subgraph Orchestration["Async orchestration"]
+            Redis[("Redis queue")]
+            Celery["Celery workers"]
+            Flower["Flower monitoring"]
+        end
+
+        subgraph Pipelines["Processing pipelines"]
+            OD["object_detect\nMediaPipe EfficientDet-Lite0\nface validation · object tracking · sprite sheet"]
+            SD["scene_detect\nPySceneDetect\nscene cuts · timeline sprite"]
+            TR["transcribe\nfaster-whisper ASR\npyannote speaker diarization"]
+        end
+
+        subgraph Outputs["Artifacts"]
+            JSON["JSON results"]
+            Sprites["Sprite sheets"]
+            Transcripts["Transcripts + speakers"]
+        end
+    end
+
+    Celluloid -->|"POST /job/create\nGET /status · GET /results\ncallback webhooks"| API
+    CLI --> OD
+    CLI --> SD
+    CLI --> TR
+
+    API --> Redis
+    Redis --> Celery
+    Celery --> Flower
+
+    Celery --> OD
+    Celery --> SD
+    Celery --> TR
+
+    OD --> JSON
+    OD --> Sprites
+    SD --> JSON
+    SD --> Sprites
+    TR --> Transcripts
+```
+
+| Pipeline | Engine | Output |
+|----------|--------|--------|
+| `object_detect` | MediaPipe (EfficientDet-Lite0) + custom tracker | Per-frame detections, tracked objects, sprite sheet |
+| `scene_detect` | PySceneDetect (content + threshold detectors) | Scene list with timestamps, optional scene sprite |
+| `transcribe` | faster-whisper (CPU INT8) + pyannote 3.1 | Timestamped transcript, speaker labels, word timings |
 
 ## Installation
 

@@ -2,7 +2,7 @@ pre-commit:
   jobs:
     - name: python-format
       glob: "*.py"
-      run: uv run black {staged_files}
+      run: uv run --extra dev black {staged_files}
     - name: python-lint
       glob: "*.py"
-      run: uv run flake8 {staged_files}
+      run: uv run --extra dev flake8 {staged_files}
