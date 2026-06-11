@@ -3,6 +3,12 @@
 This changelog is auto generated using release-it.
 
 
+## [1.13.0](https://github.com/celluloid-camp/toolkit/compare/v1.12.0...v1.13.0) (2026-06-11)
+
+### Features
+
+* enhance job creation logic to differentiate job types ([8a4eaa5](https://github.com/celluloid-camp/toolkit/commit/8a4eaa5a817bb71c133c72fff820369bc5140a1f))
+
 ## [1.12.0](https://github.com/celluloid-camp/toolkit/compare/v1.11.0...v1.12.0) (2026-06-11)
 
 ### Features
