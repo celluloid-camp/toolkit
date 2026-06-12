@@ -3,6 +3,12 @@
 This changelog is auto generated using release-it.
 
 
+## [1.13.1](https://github.com/celluloid-camp/toolkit/compare/v1.13.0...v1.13.1) (2026-06-12)
+
+### Bug Fixes
+
+* **deps:** update minor and patch updates ([#28](https://github.com/celluloid-camp/toolkit/issues/28)) ([73e971d](https://github.com/celluloid-camp/toolkit/commit/73e971d8b7997c73c22f5c91bfe490a8eb5057e5))
+
 ## [1.13.0](https://github.com/celluloid-camp/toolkit/compare/v1.12.0...v1.13.0) (2026-06-11)
 
 ### Features
