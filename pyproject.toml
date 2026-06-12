@@ -24,7 +24,7 @@ dependencies = [
     "scenedetect==0.6.7.1",
     "faster-whisper>=1.1.1",
     "pyannote.audio==3.4.0",
-    "huggingface-hub<1.0",
+    "huggingface-hub<1.20",
     "torch<2.13",
     "torchaudio<2.12",
     "ffmpeg-python>=0.2.0",
